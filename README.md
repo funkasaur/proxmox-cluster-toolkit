@@ -200,3 +200,6 @@ python3 tests/check_promql.py                  # promtool syntax check of all 44
 
 MIT (`LICENSE`), except `bios-guard/dkms/hp-bioscfg-fix-1.0/`, which is derived from the Linux kernel and is
 **GPL-2.0** (its own `LICENSE`; SPDX headers on every file).
+
+### PBS backup age
+`pbs/pbs-backup-age.sh` + `pbs/pbs-backup-age.{service,timer}` run on the PBS host every 5 min and write `pbs_backup_last_timestamp_seconds` / `pbs_backup_snapshots` per backup group (completed snapshots only) to the node-exporter textfile dir. Settings: `PBS_DATASTORE_PATH` (default `/rpool/datastore`), `PBS_DATASTORE` (label, default `main`), `TEXTFILE_DIR`. Alert idea: `time() - max by (id) (pbs_backup_last_timestamp_seconds) > 26*3600`.
