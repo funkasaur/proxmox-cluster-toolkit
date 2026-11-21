@@ -3,7 +3,7 @@
 
 Two rule groups in one folder:
   smart   SMART health of every node's boot/ZFS disk (smartctl_exporter), PBS up, datastore space, ZFS pools
-  health  node down, quorum, HA services, corosync links, storage replication, off-site PBS copy
+  health  node down, quorum, HA services, corosync links, replication, PBS backup age and off-site copy, BIOS and AMT
 
 Data: Prometheus jobs `node` (node-exporter with the textfile metrics from ../textfile/) and `smart`
 (smartctl_exporter), both with a `host` label per target. Names and limits come from config.json
@@ -234,6 +234,21 @@ class Builder:
                            "max by (node) (pve_ha_node_maintenance)", "3h", "warning",
                            "Proxmox node {{ $labels.node }} has been in HA maintenance mode for 3 h; its HA guests stay "
                            "elsewhere and it takes no failovers. Done? `pve-maint disable {{ $labels.node }}`."))
+        if self.pbs:
+            R.append(self.rule(g, "pbs-backup-stale", "PbsBackupStale",
+                               "(time() - max by (datastore, namespace, type, id) "
+                               "(pbs_backup_last_timestamp_seconds)) > bool 93600", "5m", "warning",
+                               "The latest completed backup for {{ $labels.type }}/{{ $labels.id }} in "
+                               "datastore {{ $labels.datastore }} (namespace '{{ $labels.namespace }}') is older "
+                               "than 26 h. Check the PBS task log and pbs-backup-age.timer."))
+        # Keep healthy nodes in the result so their alert instances can clear.
+        R.append(self.rule(g, "bios-guard-problem", "BiosGuardProblem",
+                           "(max by (node) (bios_guard_drift_settings) > 0)"
+                           " or on (node) (1 - min by (node) "
+                           '({__name__=~"bios_guard_bios_ok|bios_guard_amt_ok"}))',
+                           "5m", "warning",
+                           "bios-guard found BIOS drift, a BIOS problem or a failed BIOS or AMT check on "
+                           "{{ $labels.node }}. Check its report for detected drift and whether it was fixed."))
         if cfg.get("offsite_max_age_s"):
             age = cfg["offsite_max_age_s"]
             R.append(self.rule(g, "pbs-offsite-stale", "PbsOffsiteStale",

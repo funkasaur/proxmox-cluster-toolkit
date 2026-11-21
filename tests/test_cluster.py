@@ -27,7 +27,7 @@ class RulesBuildTest(unittest.TestCase):
         groups = cluster_rules.Builder(CFG).groups()
         smart, health = groups["smart"][1], groups["health"][1]
         self.assertEqual(len(smart), 13)
-        self.assertEqual(len(health), 9)
+        self.assertEqual(len(health), 11)
         uids = [r["uid"] for r in smart + health]
         self.assertEqual(len(uids), len(set(uids)))
         self.assertTrue(all(r["ruleGroup"] == "ClusterSMART" for r in smart))
@@ -55,12 +55,33 @@ class RulesBuildTest(unittest.TestCase):
         cfg = dict(CFG, standalone_nodes=[], pbs_hosts=[], smart={}, offsite_max_age_s=0)
         b = cluster_rules.Builder(cfg)
         t = titles(b.smart() + b.health())
-        for gone in ("PbsDown", "PbsDatastoreLow", "PveDiskWritesHigh", "StandaloneNodeDown", "PbsOffsiteStale"):
+        for gone in ("PbsDown", "PbsDatastoreLow", "PveDiskWritesHigh", "StandaloneNodeDown",
+                     "PbsBackupStale", "PbsOffsiteStale"):
             self.assertNotIn(gone, t)
         self.assertIn("PveNodeDown", t)
         e = exprs(b.smart())[0]
         self.assertTrue(e.startswith('max by (host) (1 - up{job="smartctl-pve"}) or '), e)
         self.assertNotIn('!~""', " ".join(exprs(b.smart() + b.health())))
+
+    def test_pbs_backup_stale(self):
+        rule = next(r for r in cluster_rules.Builder(CFG).health() if r["title"] == "PbsBackupStale")
+        self.assertEqual(rule["uid"], "pbs-backup-stale")
+        self.assertEqual(rule["noDataState"], "OK")
+        self.assertEqual(exprs([rule])[0],
+                         "(time() - max by (datastore, namespace, type, id) "
+                         "(pbs_backup_last_timestamp_seconds)) > bool 93600")
+        for label in ("datastore", "namespace", "type", "id"):
+            self.assertIn(f"{{{{ $labels.{label} }}}}", rule["annotations"]["description"])
+
+    def test_bios_guard_problem(self):
+        rule = next(r for r in cluster_rules.Builder(CFG).health() if r["title"] == "BiosGuardProblem")
+        self.assertEqual(rule["uid"], "bios-guard-problem")
+        self.assertEqual(rule["noDataState"], "OK")
+        self.assertEqual(exprs([rule])[0],
+                         "(max by (node) (bios_guard_drift_settings) > 0)"
+                         " or on (node) (1 - min by (node) "
+                         '({__name__=~"bios_guard_bios_ok|bios_guard_amt_ok"}))')
+        self.assertIn("{{ $labels.node }}", rule["annotations"]["description"])
 
 
 class RulesApplyTest(unittest.TestCase):
@@ -84,10 +105,10 @@ class RulesApplyTest(unittest.TestCase):
 
     def test_apply_both_groups_twice(self):
         self.assertEqual(self.run_main()[0], 0)
-        self.assertEqual(len(self.fake.rules), 22)
+        self.assertEqual(len(self.fake.rules), 24)
         self.assertEqual(self.fake.groups, {"ClusterSMART": 60, "ClusterHealth": 60})
         self.assertEqual(self.run_main()[0], 0)
-        self.assertEqual(len(self.fake.rules), 22)
+        self.assertEqual(len(self.fake.rules), 24)
 
     def test_hand_made_rule_blocks_without_prune(self):
         self.run_main()

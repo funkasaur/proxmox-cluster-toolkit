@@ -7,13 +7,15 @@ Server), built around Prometheus node-exporter and Grafana-managed alerting.
 |---|---|
 | `textfile/` | Three node-exporter textfile collectors + systemd timers: **corosync link** state per peer, **HA** service state / placement / maintenance / quorum, **storage replication** age and failures |
 | `smart/` | systemd unit for `smartctl_exporter` on each node, plus a smartd self-test schedule |
-| `grafana/` | **Alert rules as code** (two groups: SMART and cluster health, 22 rules) and a **cluster dashboard** builder |
+| `grafana/` | **Alert rules as code** (two groups: SMART and cluster health, 24 rules with the example config) and a **cluster dashboard** builder |
 | `maintenance/` | `pve-maint`: HA node-maintenance on/off that waits until the node is empty and lists the guests HA won't move |
 | `pbs/` | `pbs_offsite.sh`: verified ZFS send streams to an rclone remote. `pbs-backup-age.sh`: age and count metrics for completed PBS snapshots |
 | `bios-guard/` | Daily BIOS + Intel AMT drift check (and fix) for HP business desktops used as nodes, with a **patched `hp-bioscfg` driver** that makes BIOS writes work |
 
 Everything is driven by config files (`config.example.json`, `bios-guard/targets.example.json`); no host names or
 addresses are in the code. Python 3, standard library only.
+
+The [cluster guide](https://github.com/funkasaur/proxmox-mini-pc-cluster) uses `node1` through `node5`. Toolkit examples use `pve1`, `pve2`, and so on.
 
 ## 1. Textfile metrics (`textfile/`)
 
@@ -69,6 +71,9 @@ export GRAFANA_URL=http://grafana:3000 GRAFANA_TOKEN_FILE=~/.config/grafana-toke
 ./cluster_rules.py                    # creates the folder if needed, then both groups
 ```
 
+Install [`pbs-backup-age`](#pbs-backup-age) on PBS to supply the `PbsBackupStale` rule. The rule is included
+when `pbs_hosts` is set to a nonempty list.
+
 > **Warning.** Setting a group's interval goes through Grafana's rule-group endpoint, which **replaces the whole
 > group**: a rule in that group that this file doesn't list would be deleted. `grafana_rules.apply()` therefore
 > reads the group first and **refuses** if it holds other rules. Keep hand-made rules in another group, or pass
@@ -95,6 +100,8 @@ export GRAFANA_URL=http://grafana:3000 GRAFANA_TOKEN_FILE=~/.config/grafana-toke
 | | PveCorosyncLinkDown | a link lost a peer for 5 min, or no corosync data |
 | | PveHaOffPreferredNode | a service away from its preferred node for 30 min |
 | | PveHaNodeMaintenance | a node left in maintenance for 3 h |
+| | PbsBackupStale | a reported backup group's latest completed snapshot is more than 26 h old for 5 min |
+| | BiosGuardProblem | BIOS drift, a BIOS problem, or a failed BIOS or AMT check for 5 min |
 | | PbsOffsiteStale | `pbs_offsite.sh` failed or no success within `offsite_max_age_s` |
 
 Notes:
@@ -168,8 +175,18 @@ snapshots. The `namespace` label is empty for the root and uses slash-separated 
 Set `PBS_DATASTORE_PATH` (default `/rpool/datastore`), `PBS_DATASTORE` (label, default `main`), and
 `TEXTFILE_DIR` (default `/var/lib/prometheus/node-exporter`) as needed.
 
-Example age alert for each group across PBS scrape targets:
-`time() - max by (datastore, namespace, type, id) (pbs_backup_last_timestamp_seconds) > 26*3600`.
+On the PBS host, from the toolkit checkout:
+
+```sh
+sudo install -m 755 pbs/pbs-backup-age.sh /usr/local/bin/
+sudo install -m 644 pbs/pbs-backup-age.service pbs/pbs-backup-age.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now pbs-backup-age.timer
+```
+
+`PbsBackupStale` tracks age by `datastore`, `namespace`, `type`, and `id` across PBS scrape targets. A healthy
+group reports zero to Grafana. An empty datastore or an uninstalled collector has no series, so the age rule
+uses Grafana's `OK` no-data state. The rule covers groups with a reported completed snapshot.
 
 ## 7. bios-guard (`bios-guard/`)
 
@@ -210,6 +227,9 @@ sudo systemctl enable --now bios-guard.timer
 
 The system unit runs as root. Configure its SSH access and place any AMT and notification settings in
 `/root/.config/bios-guard/`. Use a persistent state file for reboot tracking.
+
+`BiosGuardProblem` uses the `--prom` output. Scrape the textfile directory on the host running bios-guard.
+The rule reports drift even if the check fixed it and uses the `OK` no-data state for installations that skip bios-guard.
 
 **Why a patched driver:** the stock `hp-bioscfg` reads but cannot write on these boards when no BIOS setup password
 is set: every write fails with BIOS code 0x4, because the driver sizes the security buffer 16 bytes too small. The
