@@ -31,6 +31,8 @@ ATTR = "/sys/class/firmware-attributes/hp-bioscfg/attributes"
 # Runs on the node: dumps attributes, optionally writes, reloads the module and re-reads.
 REMOTE = r'''
 import json, os, subprocess
+from pathlib import Path
+
 A = "%(attr)s"
 WRITES = %(writes)s
 def dump():
@@ -39,14 +41,15 @@ def dump():
         p = os.path.join(A, n, "current_value")
         if os.path.isfile(p):
             try:
-                out[n] = {"value": open(p).read().strip(), "writable": os.stat(p).st_mode & 0o222 != 0}
+                out[n] = {"value": Path(p).read_text().strip(), "writable": os.stat(p).st_mode & 0o222 != 0}
             except OSError as e:
                 out[n] = {"value": None, "error": str(e)}
     return out
 def module():
     r = subprocess.run(["modinfo", "-n", "hp_bioscfg"], capture_output=True, text=True)
     return r.stdout.strip()
-res = {"module": module(), "uptime_s": int(float(open("/proc/uptime").read().split()[0]))}
+res = {"module": module(), "uptime_s": int(float(Path("/proc/uptime").read_text().split()[0])),
+       "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip()}
 if not os.path.isdir(A):
     res["error"] = "hp-bioscfg not loaded"
 else:
@@ -59,13 +62,13 @@ else:
             results[name] = "ok"
         except OSError as e:
             results[name] = "error: " + str(e)
+    pr = Path(A) / "pending_reboot"
+    res["pending_reboot"] = pr.read_text().strip() if pr.is_file() else None
     if WRITES:
         subprocess.run(["modprobe", "-r", "hp_bioscfg"], check=False)
         subprocess.run(["modprobe", "hp_bioscfg"], check=False)
         res["after"] = dump()
     res["writes"] = results
-    pr = os.path.join(A, "pending_reboot")
-    res["pending_reboot"] = open(pr).read().strip() if os.path.isfile(pr) else None
 print(json.dumps(res))
 '''
 
@@ -122,7 +125,9 @@ def check_node(cfg, node, fix, remote=ssh_python):
 
     res = run({})
     out = {"ssh": host, "module": res.get("module"), "patched": "/updates/" in (res.get("module") or ""),
-           "uptime_s": res.get("uptime_s"), "drift": {}, "fixed": {}, "fix_failed": {}, "missing": []}
+           "uptime_s": res.get("uptime_s"), "boot_id": res.get("boot_id"),
+           "reboot_pending": res.get("pending_reboot") == "1",
+           "drift": {}, "fixed": {}, "fix_failed": {}, "missing": []}
     if res.get("error"):
         out["error"] = res["error"]
         return out
@@ -139,6 +144,9 @@ def check_node(cfg, node, fix, remote=ssh_python):
             out["fix_failed"] = {n: "stock hp-bioscfg loaded (writes fail 0x4); run install_module.sh" for n in writes}
         else:
             res2 = run(writes)
+            if res2.get("boot_id") != out["boot_id"]:
+                out["boot_id"] = res2.get("boot_id")
+                out["reboot_pending"] = False
             after = res2.get("after", {})
             for n, v in writes.items():
                 got = after.get(n, {}).get("value")
@@ -146,8 +154,19 @@ def check_node(cfg, node, fix, remote=ssh_python):
                     out["fixed"][n] = v
                 else:
                     out["fix_failed"][n] = f"{res2['writes'].get(n)}; reads back {got!r}"
-            out["reboot_pending"] = bool(out["fixed"])
+            out["reboot_pending"] |= res2.get("pending_reboot") == "1" or bool(out["fixed"])
     return out
+
+
+def remember_reboot(node, report, pending):
+    boot_id = report.get("boot_id")
+    if boot_id:
+        previous = pending.get(node)
+        if previous and previous != boot_id:
+            pending.pop(node)
+        if report.get("reboot_pending"):
+            pending[node] = boot_id
+    report["reboot_pending"] = bool(report.get("reboot_pending") or node in pending)
 
 
 def amt_get(ip, user, password, uri, timeout=10):
@@ -195,6 +214,8 @@ def summary(data):
         bits = []
         if r.get("fixed"):
             bits.append("FIXED " + ", ".join(f"{n}={v}" for n, v in r["fixed"].items()) + " (reboot pending)")
+        elif r.get("reboot_pending"):
+            bits.append("reboot pending")
         rest = {n: d for n, d in r.get("drift", {}).items() if n not in r.get("fixed", {})}
         if rest:
             bits.append("DRIFT " + ", ".join(f"{n}: {d['is']} (want {d['want']})" for n, d in rest.items()))
@@ -304,7 +325,17 @@ def main(argv=None):
     if bad:
         print(f"unknown node(s): {bad}", file=sys.stderr)
         sys.exit(2)
-    data = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "fix": args.fix, "nodes": {}, "amt": {}}
+    try:
+        with open(args.state, encoding="utf-8") as f:
+            saved = json.load(f)
+        pending = {n: boot for n, boot in saved.get("pending_reboots", {}).items() if n in cfg["nodes"]}
+    except FileNotFoundError:
+        pending = {}
+    except (OSError, ValueError, AttributeError) as e:
+        print(f"state {args.state}: {e}", file=sys.stderr)
+        sys.exit(2)
+    data = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "fix": args.fix, "nodes": {}, "amt": {},
+            "pending_reboots": pending}
     for node in nodes:
         if node not in cfg["nodes"]:
             continue
@@ -312,6 +343,7 @@ def main(argv=None):
             data["nodes"][node] = check_node(cfg, node, args.fix)
         except Exception as e:  # one dead node must not stop the rest
             data["nodes"][node] = {"error": f"{type(e).__name__}: {str(e)[:200]}"}
+        remember_reboot(node, data["nodes"][node], pending)
     if not args.no_amt:
         env = {**load_env(args.amt_env), **{k: os.environ[k] for k in ("AMT_USER", "AMT_PASS") if k in os.environ}}
         amt = {n: c["amt"] for n, c in cfg["nodes"].items() if c.get("amt")}

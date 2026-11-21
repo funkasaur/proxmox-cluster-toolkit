@@ -16,13 +16,13 @@
 #   - Google Drive's 750 GB/day upload cap: status 3, snapshot dropped, the next run retries
 #   - the --drive-* flags only matter on Google Drive remotes; rclone ignores them elsewhere
 # Required: PBS=root@<pbs host>  DST=<rclone remote:path>. Optional: DS (default rpool/datastore), KEEP_CHAINS (2),
-# FULL_DOW (7 = Sunday, `date +%u`), FORCE_FULL=1, LOG, PROM (node-exporter textfile; alert PbsOffsiteStale).
+# FULL_DOW (7 = Sunday, `date +%u`), FORCE_FULL=1, LOG, PROM (node-exporter textfile; alert PbsOffsiteStale), LOCK.
 # Example cron: 10 7 * * *  PBS=root@pbs.example.com DST=gdrive:pbs-offsite /opt/pbs/pbs_offsite.sh
 set -uo pipefail
 
-DIR="$(cd "$(dirname "$0")" && pwd)"
-LOG="${LOG:-$DIR/offsite.log}"
-PROM="${PROM:-$DIR/pbs_offsite.prom}"
+LOG="${LOG:-/var/log/pbs-offsite.log}"
+PROM="${PROM:-/var/lib/prometheus/node-exporter/pbs_offsite.prom}"
+LOCK="${LOCK:-/run/lock/pbs-offsite.lock}"
 PBS="${PBS:?set PBS=root@<pbs host>}"
 DS="${DS:-rpool/datastore}"
 DST="${DST:?set DST=<rclone remote:path>}"
@@ -31,9 +31,14 @@ FULL_DOW="${FULL_DOW:-7}"   # date +%u: 7 = Sunday
 FORCE_FULL="${FORCE_FULL:-0}"
 SSH=(ssh -o BatchMode=yes -o ConnectTimeout=15 "$PBS")
 
-exec 9>"$DIR/.offsite.lock"
+exec 9>"$LOCK" || exit 1
 flock -n 9 || { echo "$(date -Is) SKIP another run is active" >>"$LOG"; exit 0; }
 say() { echo "$(date -Is) $*" >>"$LOG"; }
+
+destroy_snapshot() {
+    local quoted=${1//\'/\'\\\'\'}
+    "${SSH[@]}" "zfs destroy '$quoted'" >>"$LOG" 2>&1
+}
 
 # status: 0 ok, 1 failed, 3 stopped at Google's daily upload cap (retries next run)
 write_prom() {
@@ -84,7 +89,7 @@ local_md5=$(cat "$TMP/md5" 2>/dev/null); bytes=$(cat "$TMP/bytes" 2>/dev/null ||
 drive_md5=$(rclone md5sum "$DST/$CHAIN/$NAME" 2>>"$LOG" | cut -d' ' -f1)
 
 if [[ ${rcs[0]} != 0 || ${rcs[2]} != 0 || -z $local_md5 || $local_md5 != "$drive_md5" ]]; then
-    "${SSH[@]}" "zfs destroy $NEW" >>"$LOG" 2>&1
+    destroy_snapshot "$NEW"
     rclone deletefile "$DST/$CHAIN/$NAME" >>"$LOG" 2>&1
     if tail -n 30 "$LOG" | grep -qiE 'upload limit|uploadLimitExceeded|userRateLimitExceeded'; then
         say "PARTIAL stopped at Google's daily upload cap; snapshot dropped, retry next run"; write_prom 3 "$KIND"; exit 0
@@ -95,7 +100,10 @@ fi
 echo "$local_md5  $NAME" | rclone rcat "$DST/$CHAIN/${NAME%.zfs}.md5" 2>>"$LOG"
 
 # Only the new snapshot stays on PBS (base for tomorrow); older offsite snapshots go.
-for s in $(grep "@offsite-" <<<"$snaps"); do "${SSH[@]}" "zfs destroy $s" >>"$LOG" 2>&1; done
+while IFS= read -r s; do
+    [[ $s == "$DS@offsite-"* && $s != "$NEW" ]] || continue
+    destroy_snapshot "$s"
+done <<<"$snaps"
 # Keep the newest KEEP_CHAINS chains on the remote.
 mapfile -t chains < <(rclone lsf --dirs-only "$DST" 2>>"$LOG" | grep '^chain-' | sort | tr -d /)
 for (( i = 0; i < ${#chains[@]} - KEEP_CHAINS; i++ )); do

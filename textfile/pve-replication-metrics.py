@@ -42,7 +42,7 @@ def write(path, text):
 
 
 def main():
-    node = socket.gethostname()
+    node = socket.gethostname().split(".")[0]
     r = subprocess.run(["pvesh", "get", f"/nodes/{node}/replication", "--output-format", "json"],
                        capture_output=True, text=True, timeout=60, check=True)
     write(OUT, render(json.loads(r.stdout or "[]"), node))

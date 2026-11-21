@@ -1,6 +1,12 @@
+import os
+import shlex
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
-from tests import load
+from tests import ROOT, load
 
 ha = load("textfile/pve-ha-metrics.py", "pve_ha_metrics")
 coro = load("textfile/pve-corosync-metrics.py", "pve_corosync_metrics")
@@ -81,6 +87,13 @@ class CorosyncTest(unittest.TestCase):
 
 
 class ReplicationTest(unittest.TestCase):
+    def test_pvesh_uses_short_hostname(self):
+        with (mock.patch.object(repl.socket, "gethostname", return_value="node.example.test"),
+              mock.patch.object(repl.subprocess, "run", return_value=mock.Mock(stdout="[]")) as run,
+              mock.patch.object(repl, "write")):
+            repl.main()
+        self.assertEqual(run.call_args.args[0][2], "/nodes/node/replication")
+
     def test_jobs(self):
         jobs = [{"id": "100-0", "guest": 100, "target": "pve1", "last_sync": 1699999000, "fail_count": 0,
                  "duration": 4.2},
@@ -98,10 +111,62 @@ class ReplicationTest(unittest.TestCase):
         self.assertNotIn("repl_id", out)
 
 
+class PbsBackupAgeTest(unittest.TestCase):
+    def test_root_and_nested_groups_count_only_completed_snapshots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            datastore = Path(directory) / "data store"
+            groups = ["vm/100", "ns/site/ct/100", "ns/site/ns/archive/host/node"]
+            for group in groups:
+                for day in (1, 2, 3):
+                    snapshot = datastore / group / f"2026-01-0{day}T00:00:00Z"
+                    snapshot.mkdir(parents=True)
+                    if day < 3:
+                        (snapshot / "index.json.blob").touch()
+            env = dict(os.environ, PBS_DATASTORE_PATH=str(datastore), PBS_DATASTORE="test", TEXTFILE_DIR=directory)
+            subprocess.run(["bash", str(Path(ROOT) / "pbs/pbs-backup-age.sh")], env=env, check=True)
+            result = (Path(directory) / "pbs_backups.prom").read_text()
+            for ns, kind, group_id in (("", "vm", "100"), ("site", "ct", "100"), ("site/archive", "host", "node")):
+                labels = f'datastore="test",type="{kind}",id="{group_id}",namespace="{ns}"'
+                self.assertIn("pbs_backup_snapshots{" + labels + "} 2\n", result)
+                self.assertIn("pbs_backup_last_timestamp_seconds{" + labels + "} 1767312000\n", result)
+
+
+class PbsOffsiteTest(unittest.TestCase):
+    def test_cleanup_passes_one_snapshot_name_to_remote_shell(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            commands = root / "commands"
+            old = "rpool/datastore@offsite-old 'snapshot'"
+            ssh = root / "ssh"
+            ssh.write_text("""#!/bin/bash
+case "${@: -1}" in
+    "zfs list "*) printf '%s\n' "$OLD_SNAPSHOT" 'rpool/other@offsite-old' ;;
+    "zfs send "*) printf 'test stream' ;;
+    "zfs destroy "*) printf '%s\n' "${@: -1}" >>"$COMMANDS" ;;
+esac
+""")
+            rclone = root / "rclone"
+            rclone.write_text("""#!/bin/bash
+case "$1" in
+    rcat) cat >/dev/null ;;
+    md5sum) printf 'test stream' | md5sum ;;
+    size) printf '{"bytes": 11}\n' ;;
+esac
+""")
+            for script in (ssh, rclone):
+                script.chmod(0o755)
+            env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}", PBS="root@pbs.example.test",
+                       DS="rpool/datastore", DST="test:offsite", OLD_SNAPSHOT=old, COMMANDS=str(commands),
+                       FORCE_FULL="1", LOG=str(root / "offsite.log"), PROM=str(root / "offsite.prom"),
+                       LOCK=str(root / "offsite.lock"), TMPDIR=directory)
+            subprocess.run(["bash", str(Path(ROOT) / "pbs/pbs_offsite.sh")], env=env, check=True, timeout=10)
+            self.assertEqual([shlex.split(line) for line in commands.read_text().splitlines()],
+                             [["zfs", "destroy", old]])
+            self.assertIn("pbs_offsite_status 0", (root / "offsite.prom").read_text())
+
+
 class WriteTest(unittest.TestCase):
     def test_atomic_write(self):
-        import os
-        import tempfile
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "x.prom")
             ha.write(p, "a 1\n")

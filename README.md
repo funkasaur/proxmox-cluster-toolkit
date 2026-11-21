@@ -9,7 +9,7 @@ Server), built around Prometheus node-exporter and Grafana-managed alerting.
 | `smart/` | systemd unit for `smartctl_exporter` on each node, plus a smartd self-test schedule |
 | `grafana/` | **Alert rules as code** (two groups: SMART and cluster health, 22 rules) and a **cluster dashboard** builder |
 | `maintenance/` | `pve-maint`: HA node-maintenance on/off that waits until the node is empty and lists the guests HA won't move |
-| `pbs/` | `pbs_offsite.sh`: off-site copy of a PBS datastore to any rclone remote as verified ZFS send streams |
+| `pbs/` | `pbs_offsite.sh`: verified ZFS send streams to an rclone remote. `pbs-backup-age.sh`: age and count metrics for completed PBS snapshots |
 | `bios-guard/` | Daily BIOS + Intel AMT drift check (and fix) for HP business desktops used as nodes, with a **patched `hp-bioscfg` driver** that makes BIOS writes work |
 
 Everything is driven by config files (`config.example.json`, `bios-guard/targets.example.json`); no host names or
@@ -130,7 +130,9 @@ down or migrate them before a reboot.
 configs from `/etc/pve/nodes/<dead>/qemu-server/` to `/etc/pve/nodes/<alive>/qemu-server/`, then `qm start` (the
 replica is as old as the last sync). With three nodes, let HA do this.
 
-## 6. PBS off-site copy (`pbs/pbs_offsite.sh`)
+## 6. PBS (`pbs/`)
+
+### Off-site copy (`pbs/pbs_offsite.sh`)
 
 Runs on a host that can ssh to PBS as root and has an rclone remote. Each run snapshots the datastore's ZFS dataset,
 pipes `zfs send -c` (a full stream once a week, incrementals between) straight into `rclone rcat`, checks the
@@ -139,8 +141,11 @@ PbsOffsiteStale rule. Streams instead of the chunk files because a datastore has
 which cloud storage APIs upload slowly. Options are in the script header.
 
 ```sh
-PBS=root@pbs.example.com DST=gdrive:pbs-offsite PROM=/var/lib/prometheus/node-exporter/pbs_offsite.prom ./pbs/pbs_offsite.sh
+PBS=root@pbs.example.com DST=gdrive:pbs-offsite ./pbs/pbs_offsite.sh
 ```
+
+The defaults are `LOG=/var/log/pbs-offsite.log`, `PROM=/var/lib/prometheus/node-exporter/pbs_offsite.prom`,
+and `LOCK=/run/lock/pbs-offsite.lock`. Set these variables to writable paths when running as an unprivileged user.
 
 If PVE encrypts the backups (recommended), **the copy is useless without the encryption key**: keep the key file and
 its paper key somewhere other than the cluster.
@@ -155,6 +160,17 @@ Restore (test it once):
    in PVE as PBS storage with the same encryption key, and restore from the UI.
 5. Clean up: remove the ACLs, `proxmox-backup-manager datastore remove restored`, `zfs destroy -r rpool/restored`.
 
+### PBS backup age
+
+`pbs/pbs-backup-age.sh` and its systemd service and timer run on the PBS host every five minutes. They
+write `pbs_backup_last_timestamp_seconds` and `pbs_backup_snapshots` per backup group using completed
+snapshots. The `namespace` label is empty for the root and uses slash-separated names for nested namespaces.
+Set `PBS_DATASTORE_PATH` (default `/rpool/datastore`), `PBS_DATASTORE` (label, default `main`), and
+`TEXTFILE_DIR` (default `/var/lib/prometheus/node-exporter`) as needed.
+
+Example age alert for each group across PBS scrape targets:
+`time() - max by (datastore, namespace, type, id) (pbs_backup_last_timestamp_seconds) > 26*3600`.
+
 ## 7. bios-guard (`bios-guard/`)
 
 For HP business desktops (tested: EliteDesk 800 G3 Mini) used as Proxmox nodes. Their BIOS can lose settings, for
@@ -163,7 +179,8 @@ monitoring host:
 
 - **BIOS**: over ssh, reads every `hp-bioscfg` attribute (`/sys/class/firmware-attributes/hp-bioscfg/`), compares
   with `targets.json`, and with `--fix` writes drifted writable settings back, reloads the module and reads them
-  again from the BIOS. Changes apply at the next boot: it reports "reboot pending" and never reboots. Settings in
+  again from the BIOS. The reboot-pending flag is sampled before reload and saved in `last.json` until the
+  node reports a new boot ID. Settings in
   `never_write` (e.g. "Unconfigure AMT on next boot") are checked, never written.
 - **AMT**: WS-Man reads on `:16992` with a read-only AMT account: control mode ACM, no user consent, SOL + IDE-R on,
   KVM on. CCM activation from the OS needs on-screen consent for KVM, which is useless headless, so a failure here
@@ -180,11 +197,27 @@ mkdir -p ~/.config/bios-guard && install -m 600 bios-guard/amt.env.example ~/.co
 ./bios-guard/bios_guard.py --fix                             # or the systemd timer in bios-guard/systemd/
 ```
 
+For the systemd timer, install the script and a configured targets file on the monitoring host:
+
+```sh
+sudo install -d -m 755 /opt/bios-guard
+sudo install -m 755 bios-guard/bios_guard.py /opt/bios-guard/
+sudo install -m 600 bios-guard/targets.json /opt/bios-guard/
+sudo install -m 644 bios-guard/systemd/bios-guard.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now bios-guard.timer
+```
+
+The system unit runs as root. Configure its SSH access and place any AMT and notification settings in
+`/root/.config/bios-guard/`. Use a persistent state file for reboot tracking.
+
 **Why a patched driver:** the stock `hp-bioscfg` reads but cannot write on these boards when no BIOS setup password
 is set: every write fails with BIOS code 0x4, because the driver sizes the security buffer 16 bytes too small. The
 fix is one function; details in `bios-guard/dkms/hp-bioscfg-fix-1.0/README.md`. `install_module.sh` builds it with
 DKMS for every installed kernel, so kernel updates rebuild it. If a build ever fails, the stock module loads, reads
 still work, and the summary says **PATCHED MODULE NOT LOADED** until you rerun `install_module.sh`.
+The vendored DKMS source targets Linux 7.0 kernels, including Proxmox kernels that provide
+`kzalloc_obj` and `kzalloc_objs`. Older kernels without these helpers need a compatibility patch.
 
 The write fix is meant for the mainline kernel (`upstream-fix.patch`); once a kernel you run carries it, drop the
 DKMS module.
@@ -192,7 +225,7 @@ DKMS module.
 ## Tests
 
 ```sh
-python3 -m unittest discover -s tests -t .     # 44 tests, no network, no cluster needed
+python3 -m unittest discover -s tests -t .     # no network or cluster needed
 python3 tests/check_promql.py                  # promtool syntax check of all 44 queries (Docker)
 ```
 
@@ -200,6 +233,3 @@ python3 tests/check_promql.py                  # promtool syntax check of all 44
 
 MIT (`LICENSE`), except `bios-guard/dkms/hp-bioscfg-fix-1.0/`, which is derived from the Linux kernel and is
 **GPL-2.0** (its own `LICENSE`; SPDX headers on every file).
-
-### PBS backup age
-`pbs/pbs-backup-age.sh` + `pbs/pbs-backup-age.{service,timer}` run on the PBS host every 5 min and write `pbs_backup_last_timestamp_seconds` / `pbs_backup_snapshots` per backup group (completed snapshots only) to the node-exporter textfile dir. Settings: `PBS_DATASTORE_PATH` (default `/rpool/datastore`), `PBS_DATASTORE` (label, default `main`), `TEXTFILE_DIR`. Alert idea: `time() - max by (id) (pbs_backup_last_timestamp_seconds) > 26*3600`.

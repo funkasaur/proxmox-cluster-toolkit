@@ -1,14 +1,18 @@
 import ast
+import contextlib
+import io
 import json
 import os
 import tempfile
 import unittest
 import urllib.error
+from pathlib import Path
+from unittest import mock
 
 import bios_guard as bg
 from tests import ROOT
 
-CFG = json.load(open(os.path.join(ROOT, "bios-guard", "targets.example.json")))
+CFG = json.loads((Path(ROOT) / "bios-guard" / "targets.example.json").read_text())
 
 
 def attrs(**over):
@@ -73,6 +77,43 @@ class NodeTest(unittest.TestCase):
     def test_override(self):
         self.assertEqual(bg.targets_for(CFG, "pve3")["Increase Idle Fan Speed(%)"], "40")
         self.assertNotIn("Increase Idle Fan Speed(%)", bg.targets_for(CFG, "pve1"))
+
+    def test_pending_is_sampled_before_module_reload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pending = Path(directory) / "pending_reboot"
+            pending.write_text("1\n")
+            setting = Path(directory) / "Setting"
+            setting.mkdir()
+            (setting / "current_value").write_text("old")
+
+            def run(args, **kwargs):
+                if args[0] == "modprobe":
+                    pending.write_text("0\n")
+                return mock.Mock(stdout="/updates/dkms/hp-bioscfg.ko")
+
+            with (mock.patch.object(bg.subprocess, "run", side_effect=run),
+                  contextlib.redirect_stdout(io.StringIO()) as output):
+                exec(bg.REMOTE % {"attr": directory, "writes": repr({"Setting": "new"})}, {})
+            self.assertEqual(json.loads(output.getvalue())["pending_reboot"], "1")
+            self.assertEqual(pending.read_text().strip(), "0")
+
+    def test_pending_survives_later_checks_until_boot_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "targets.json"
+            state = Path(directory) / "last.json"
+            prom = Path(directory) / "bios.prom"
+            config.write_text(json.dumps(CFG))
+            args = ["--config", str(config), "--state", str(state), "--prom", str(prom), "--node", "pve1", "--no-amt"]
+            reports = [{"boot_id": "boot-a", "reboot_pending": True, "patched": True},
+                       OSError("offline"),
+                       {"boot_id": "boot-a", "reboot_pending": False, "patched": True},
+                       {"boot_id": "boot-b", "reboot_pending": False, "patched": True}]
+            with (mock.patch.object(bg, "check_node", side_effect=reports),
+                  contextlib.redirect_stdout(io.StringIO())):
+                for expected in (1, 1, 1, 0):
+                    bg.main(args)
+                    self.assertIn(f'bios_guard_reboot_pending{{node="pve1"}} {expected}', prom.read_text())
+            self.assertEqual(json.loads(state.read_text())["pending_reboots"], {})
 
 
 def amt_reply(values, status=200):
