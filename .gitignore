@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+config.json
+bios-guard/targets.json
+bios-guard/last.json
+*.env
+*.prom
+*.tmp

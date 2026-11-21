@@ -1,0 +1,9 @@
+[Unit]
+Description=Corosync link status metrics every 1min
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+
+[Install]
+WantedBy=timers.target

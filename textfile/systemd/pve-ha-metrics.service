@@ -1,0 +1,6 @@
+[Unit]
+Description=Write Proxmox HA status for node-exporter
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pve-ha-metrics.py

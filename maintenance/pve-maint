@@ -1,0 +1,139 @@
+#!/usr/bin/python3
+"""pve-maint: put a Proxmox VE node into HA maintenance and wait until it is empty, or take it out again.
+
+Run on any cluster node as root:
+  pve-maint status                 node states + where each HA service runs
+  pve-maint enable  NODE           ha-manager crm-command node-maintenance enable NODE, then wait until no
+                                   HA service is left on NODE; lists non-HA guests still running there
+  pve-maint disable NODE           ...disable NODE, then wait until the HA manager sees it online again
+Options: --timeout SECONDS (default 600), --no-wait.
+
+HA live-migrates (VMs) or relocates (containers) its services off the node in maintenance; once the node is back
+and maintenance is disabled, services with a node-affinity rule for it move back by themselves.
+Guests that are not HA-managed are not touched: shut them down or migrate them yourself before a reboot.
+"""
+import argparse
+import json
+import subprocess
+import sys
+import time
+
+
+def sh(args):
+    return subprocess.run(args, capture_output=True, text=True, timeout=120, check=True).stdout
+
+
+def pvesh(path, run=sh):
+    return json.loads(run(["pvesh", "get", path, "--output-format", "json"]) or "null")
+
+
+def ha_state(run=sh):
+    cur = pvesh("/cluster/ha/status/current", run) or []
+    mgr = (pvesh("/cluster/ha/status/manager_status", run) or {}).get("manager_status", {})
+    services = [s for s in cur if s.get("type") == "service"]
+    return services, mgr.get("node_status", {})
+
+
+def services_on(node, services):
+    """HA services still placed on `node` that HA will move (not stopped/ignored/disabled)."""
+    return [s["sid"] for s in services
+            if s.get("node") == node and s.get("state") not in ("stopped", "ignored", "disabled")]
+
+
+def unmanaged_running(node, services, run=sh):
+    ha = {s["sid"] for s in services}
+    out = []
+    for kind, prefix in (("qemu", "vm"), ("lxc", "ct")):
+        for g in pvesh(f"/nodes/{node}/{kind}", run) or []:
+            if g.get("status") == "running" and f"{prefix}:{g['vmid']}" not in ha:
+                out.append(f"{prefix}:{g['vmid']} {g.get('name', '')}".strip())
+    return out
+
+
+def wait(check, timeout, interval=5, clock=time.monotonic, sleep=time.sleep):
+    end = clock() + timeout
+    while True:
+        done, msg = check()
+        if done:
+            return True
+        if clock() >= end:
+            print(f"timed out: {msg}", file=sys.stderr)
+            return False
+        print(f"  waiting: {msg}")
+        sleep(interval)
+
+
+def status(run=sh):
+    services, nodes = ha_state(run)
+    for node, st in sorted(nodes.items()):
+        on = [f"{s['sid']} ({s.get('state')})" for s in services if s.get("node") == node]
+        print(f"{node}: {st}" + (f"  {', '.join(on)}" if on else ""))
+    return 0
+
+
+def enable(node, timeout, no_wait=False, run=sh, **kw):
+    services, nodes = ha_state(run)
+    if node not in nodes:
+        print(f"unknown node {node!r}; HA knows: {', '.join(sorted(nodes)) or 'none'}", file=sys.stderr)
+        return 2
+    run(["ha-manager", "crm-command", "node-maintenance", "enable", node])
+    print(f"{node}: maintenance requested")
+    if no_wait:
+        return 0
+
+    def check():
+        services, nodes = ha_state(run)
+        left = services_on(node, services)
+        if nodes.get(node) != "maintenance":
+            return False, f"{node} is {nodes.get(node)!r}, not yet in maintenance"
+        if left:
+            return False, f"still on {node}: {', '.join(left)}"
+        return True, ""
+
+    if not wait(check, timeout, **kw):
+        return 1
+    print(f"{node}: in maintenance, no HA services left")
+    rest = unmanaged_running(node, ha_state(run)[0], run)
+    if rest:
+        print(f"{node}: NOT HA-managed and still running (shut down or migrate them before a reboot): "
+              + ", ".join(rest))
+    return 0
+
+
+def disable(node, timeout, no_wait=False, run=sh, **kw):
+    run(["ha-manager", "crm-command", "node-maintenance", "disable", node])
+    print(f"{node}: maintenance off requested")
+    if no_wait:
+        return 0
+
+    def check():
+        st = ha_state(run)[1].get(node)
+        return st == "online", f"{node} is {st!r}"
+
+    if not wait(check, timeout, **kw):
+        return 1
+    print(f"{node}: online; HA services with a node-affinity rule for it move back by themselves")
+    return 0
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("status")
+    for c in ("enable", "disable"):
+        p = sub.add_parser(c)
+        p.add_argument("node")
+        p.add_argument("--timeout", type=int, default=600)
+        p.add_argument("--no-wait", action="store_true")
+    a = ap.parse_args(argv)
+    try:
+        if a.cmd == "status":
+            return status()
+        return (enable if a.cmd == "enable" else disable)(a.node, a.timeout, a.no_wait)
+    except subprocess.CalledProcessError as e:
+        print(f"error: {' '.join(e.cmd)}: {(e.stderr or '').strip()}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

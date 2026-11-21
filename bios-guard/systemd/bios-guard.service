@@ -1,0 +1,8 @@
+[Unit]
+Description=bios-guard: HP BIOS + AMT drift check (and fix)
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Runs on the monitoring host, not on the nodes; it reaches them over ssh with a key.
+ExecStart=/opt/bios-guard/bios_guard.py --fix --notify --prom /var/lib/prometheus/node-exporter/bios_guard.prom

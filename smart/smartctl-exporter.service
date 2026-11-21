@@ -1,0 +1,11 @@
+[Unit]
+Description=Prometheus smartctl_exporter (SMART data on :9633)
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/smartctl_exporter --smartctl.interval=300s --web.listen-address=:9633
+Restart=on-failure
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

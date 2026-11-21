@@ -1,0 +1,6 @@
+[Unit]
+Description=Write Proxmox replication status for node-exporter
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pve-replication-metrics.py

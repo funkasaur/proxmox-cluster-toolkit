@@ -1,0 +1,28 @@
+{
+  "_comment": "Copy to config.json and edit. Host names are the `host` label your Prometheus targets carry (see examples/prometheus.yml).",
+  "grafana": {
+    "folder_uid": "proxmox",
+    "folder_title": "Proxmox",
+    "datasource_uid": "prometheus",
+    "smart_group": "ClusterSMART",
+    "health_group": "ClusterHealth",
+    "interval_s": 60
+  },
+  "jobs": {"node": "node-pve", "smart": "smartctl-pve"},
+  "cluster_nodes": ["pve1", "pve2", "pve3"],
+  "standalone_nodes": ["pve4"],
+  "pbs_hosts": ["pbs"],
+  "pbs_datastore_mountpoint": "/rpool/datastore",
+  "smart": {
+    "writes_gib_limit": 150000,
+    "writes_gib_limit_per_host": {"pbs": 75000, "pve4": 75000},
+    "disk_hot_celsius": 60,
+    "nvme_used_percent": 80
+  },
+  "replication_max_age_s": 3600,
+  "offsite_max_age_s": 93600,
+  "links": {
+    "Proxmox UI": "https://pve1.example.com:8006",
+    "PBS UI": "https://pbs.example.com:8007"
+  }
+}

@@ -1,0 +1,39 @@
+SPDX-License-Identifier: GPL-2.0
+
+platform/x86: hp-bioscfg: count the UTF-16 prefix for an empty password
+
+hp_calculate_security_buffer() returns 4 bytes when no setup password is
+set, but hp_populate_security_buffer() always writes the "<utf-16/>"
+prefix unless the token is a BEAM signature. The buffer handed to the
+BIOS is then 16 bytes short (and 16 bytes are written past the end of
+the kmalloc'd buffer). On an HP EliteDesk 800 G3 every write to
+current_value fails with BIOS return code 0x4.
+
+Count the prefix for an empty or missing password too.
+
+Not sent upstream yet. Apply to a kernel tree with `patch -p1`.
+
+--- a/drivers/platform/x86/hp/hp-bioscfg/spmobj-attributes.c
++++ b/drivers/platform/x86/hp/hp-bioscfg/spmobj-attributes.c
+@@ -43,15 +43,14 @@
+ {
+ 	size_t size, authlen;
+ 
+-	if (!authentication)
+-		return sizeof(u16) * 2;
+-
+-	authlen = strlen(authentication);
+-	if (!authlen)
+-		return sizeof(u16) * 2;
++	/*
++	 * hp_populate_security_buffer() always writes UTF_PREFIX unless the
++	 * token is a BEAM signature, so count it for an empty password too.
++	 */
++	authlen = authentication ? strlen(authentication) : 0;
+ 
+ 	size = sizeof(u16) + authlen * sizeof(u16);
+-	if (!strstarts(authentication, BEAM_PREFIX))
++	if (!authentication || !strstarts(authentication, BEAM_PREFIX))
+ 		size += strlen(UTF_PREFIX) * sizeof(u16);
+ 
+ 	return size;

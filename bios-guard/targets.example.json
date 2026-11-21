@@ -1,0 +1,21 @@
+{
+  "_comment": "Copy to targets.json. BIOS targets use hp-bioscfg attribute names ('/' in a BIOS name shows as '!'; list them with --dump NODE). `common` applies to every node, `override` per node. Values here are examples from HP EliteDesk 800 G3 Minis.",
+  "common": {
+    "After Power Loss": "Power On",
+    "PCI Express Power Management": "Disable",
+    "SATA Power Management": "Disable",
+    "Virtualization Technology (VTx)": "Enable",
+    "Virtualization Technology for Directed I!O (VTd)": "Enable",
+    "Active Management (AMT)": "Enable",
+    "USB Redirection Support": "Enable",
+    "SOL Terminal Emulation Mode": "ANSI",
+    "Unconfigure AMT on next boot": "Do Not Apply"
+  },
+  "never_write": ["Unconfigure AMT on next boot"],
+  "nodes": {
+    "pve1": {"ssh": "root@192.0.2.11", "amt": "192.0.2.111"},
+    "pve2": {"ssh": "root@192.0.2.12", "amt": "192.0.2.112"},
+    "pve3": {"ssh": "root@192.0.2.13", "amt": "192.0.2.113", "override": {"Increase Idle Fan Speed(%)": "40"}}
+  },
+  "amt_only": {"spare-box": "192.0.2.120"}
+}

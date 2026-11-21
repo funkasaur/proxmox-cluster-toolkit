@@ -1,0 +1,29 @@
+# Scrape jobs the rules and dashboard expect. Every target needs a `host` label (the node name).
+# node-exporter reads the textfile metrics from /var/lib/prometheus/node-exporter/ (Debian's
+# prometheus-node-exporter package uses that directory by default).
+scrape_configs:
+  - job_name: node-pve
+    static_configs:
+      - targets: ["192.0.2.11:9100"]
+        labels: {host: pve1}
+      - targets: ["192.0.2.12:9100"]
+        labels: {host: pve2}
+      - targets: ["192.0.2.13:9100"]
+        labels: {host: pve3}
+      - targets: ["192.0.2.14:9100"]
+        labels: {host: pve4}
+      - targets: ["192.0.2.20:9100"]
+        labels: {host: pbs}
+  - job_name: smartctl-pve
+    scrape_interval: 60s
+    static_configs:
+      - targets: ["192.0.2.11:9633"]
+        labels: {host: pve1}
+      - targets: ["192.0.2.12:9633"]
+        labels: {host: pve2}
+      - targets: ["192.0.2.13:9633"]
+        labels: {host: pve3}
+      - targets: ["192.0.2.14:9633"]
+        labels: {host: pve4}
+      - targets: ["192.0.2.20:9633"]
+        labels: {host: pbs}
