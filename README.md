@@ -1,4 +1,22 @@
-# proxmox-cluster-toolkit
+<h1 align="center">proxmox-cluster-toolkit</h1>
+
+<p align="center">Monitor and maintain Proxmox VE and Proxmox Backup Server.</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/github/license/funkasaur/proxmox-cluster-toolkit"></a>
+  <a href="https://github.com/funkasaur/proxmox-cluster-toolkit/commits/"><img alt="Last commit" src="https://img.shields.io/github/last-commit/funkasaur/proxmox-cluster-toolkit"></a>
+</p>
+
+<p align="center">
+  <img alt="Cluster nodes" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/funkasaur/proxmox-mini-pc-cluster/badges/cluster_nodes.json">
+  <img alt="VMs running" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/funkasaur/proxmox-mini-pc-cluster/badges/vms_running.json">
+  <img alt="Containers running" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/funkasaur/proxmox-mini-pc-cluster/badges/containers_running.json">
+  <img alt="Uptime days" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/funkasaur/proxmox-mini-pc-cluster/badges/uptime_days.json">
+  <img alt="Alerts firing" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/funkasaur/proxmox-mini-pc-cluster/badges/alerts_firing.json">
+  <img alt="GPUs" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/funkasaur/proxmox-mini-pc-cluster/badges/gpus.json">
+</p>
+
+## Overview
 
 Monitoring and maintenance tools for a small Proxmox VE cluster (plus standalone Proxmox boxes and a Proxmox Backup
 Server), built around Prometheus node-exporter and Grafana-managed alerting.
@@ -16,6 +34,31 @@ Everything is driven by config files (`config.example.json`, `bios-guard/targets
 addresses are in the code. Python 3, standard library only.
 
 The [cluster guide](https://github.com/funkasaur/proxmox-mini-pc-cluster) uses `node1` through `node5`. Toolkit examples use `pve1`, `pve2`, and so on.
+
+## Features
+
+- Collects corosync, HA, replication and backup health.
+- Builds Grafana alert rules and dashboards.
+- Helps with node maintenance, off-site backups and BIOS drift.
+
+## Hardware
+
+| Tested hardware | Use |
+|---|---|
+| HP EliteDesk 800 G3 Mini | Proxmox nodes tested with BIOS Guard |
+
+## Repository structure
+
+```text
+proxmox-cluster-toolkit/
+├── textfile/     # Node-exporter collectors
+├── smart/        # SMART monitoring
+├── grafana/      # Alert rules and dashboard tools
+├── maintenance/  # HA maintenance helper
+├── pbs/          # Backup copy and age checks
+├── bios-guard/   # BIOS drift tooling and DKMS driver
+└── tests/        # Offline checks
+```
 
 ## 1. Textfile metrics (`textfile/`)
 
